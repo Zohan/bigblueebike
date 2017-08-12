@@ -1,13 +1,29 @@
-#include <Adafruit_NeoPixel.h>
+#include <FastLED.h>
+#include <EEPROM.h>
 #ifdef __AVR__
   #include <avr/power.h>
 #endif
 
-#define PIN 8
+#define LED_PIN     5
+#define COLOR_ORDER GRB
+#define CHIPSET     WS2811
+#define NUM_LEDS    64
+
+#define BRIGHTNESS  200
+#define FRAMES_PER_SECOND 60
+
+#define COOLING  55
+#define SPARKING 120
+
+bool gReverseDirection = false;
+
+CRGB leds[NUM_LEDS];
+CRGBPalette16 gPal;
+byte mode;
+uint8_t gHue = 0; // rotating "base color" used by many of the patterns
+
 #define buttonPin 2
 #define piezoPin 9
-
-Adafruit_NeoPixel strip = Adafruit_NeoPixel(47, PIN, NEO_RGB + NEO_KHZ800);
 
 // Generally, you should use "unsigned long" for variables that hold time
 // The value will quickly become too large for an int to store
@@ -35,12 +51,26 @@ void setup() {
   pinMode(piezoPin, OUTPUT);
   tone(piezoPin, 784, 100);
   //delay(100);
-  strip.begin();
-  strip.show(); // Initialize all pixels to 'off'
+  mode = EEPROM.read(0);
+  if(mode >= 2) {
+    mode = 0;
+  } else mode++;
+  EEPROM.write(0, mode);
+  FastLED.addLeds<CHIPSET, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection( TypicalLEDStrip );
+  if(mode < 3) FastLED.setBrightness(20);
+  else FastLED.setBrightness(15);
+  FastLED.clear(true);
+  delay(500);
+  leds[0] = CRGB::Aqua;
+  delay(250);
+  FastLED.show();
+  
+  //gPal = CRGBPalette16( CRGB::DarkBlue, CRGB::MediumBlue, CRGB::SeaGreen, CRGB::Teal );
+  gPal = CRGBPalette16( CRGB::Teal, CRGB::SeaGreen, CRGB::MediumBlue, CRGB::DarkBlue );
+  
 }
 
 void loop() {
-  rainbowCycle(rainbowCycleVar);
   int buttonState = digitalRead(buttonPin);
 
  
@@ -52,7 +82,9 @@ void loop() {
     noTone(piezoPin);
     currentNote = 0;
   }
-  rainbowCycleVar++;
+  random16_add_entropy( random());
+  Fire2012WithPalette(); // run simulation frame, using palette colors
+  FastLED.show(); // display this frame
   delay(20);
 }
 
@@ -70,62 +102,35 @@ void playSong() {
   }
 }
 
-// Slightly different, this makes the rainbow equally distributed throughout
-void rainbowCycle(uint8_t wait) {
-  uint16_t i, j;
-  for(i=0; i< strip.numPixels(); i++) {
-    strip.setPixelColor(i, Wheel(((i * 256 / strip.numPixels()) + rainbowCycleVar) & 255));
-  }
-  strip.show();
-}
+void Fire2012WithPalette()
+{
+// Array of temperature readings at each simulation cell
+  static byte heat[NUM_LEDS];
 
-//Theatre-style crawling lights.
-void theaterChase(uint32_t c, uint8_t wait) {
-  for (int j=0; j<10; j++) {  //do 10 cycles of chasing
-    for (int q=0; q < 3; q++) {
-      for (int i=0; i < strip.numPixels(); i=i+3) {
-        strip.setPixelColor(i+q, c);    //turn every third pixel on
-      }
-      strip.show();
-
-      delay(wait);
-
-      for (int i=0; i < strip.numPixels(); i=i+3) {
-        strip.setPixelColor(i+q, 0);        //turn every third pixel off
-      }
+  // Step 1.  Cool down every cell a little
+    for( int i = 0; i < NUM_LEDS; i++) {
+      heat[i] = qsub8( heat[i],  random8(0, ((COOLING * 10) / NUM_LEDS) + 2));
     }
-  }
-}
-
-//Theatre-style crawling lights with rainbow effect
-void theaterChaseRainbow(uint8_t wait) {
-  for (int j=0; j < 256; j++) {     // cycle all 256 colors in the wheel
-    for (int q=0; q < 3; q++) {
-      for (int i=0; i < strip.numPixels(); i=i+3) {
-        strip.setPixelColor(i+q, Wheel( (i+j) % 255));    //turn every third pixel on
-      }
-      strip.show();
-
-      delay(wait);
-
-      for (int i=0; i < strip.numPixels(); i=i+3) {
-        strip.setPixelColor(i+q, 0);        //turn every third pixel off
-      }
+  
+    // Step 2.  Heat from each cell drifts 'up' and diffuses a little
+    for( int k= NUM_LEDS - 1; k >= 2; k--) {
+      heat[k] = (heat[k - 1] + heat[k - 2] + heat[k - 2] ) / 3;
     }
-  }
-}
+    
+    // Step 3.  Randomly ignite new 'sparks' of heat near the bottom
+    if( random8() < SPARKING ) {
+      int y = random8(7);
+      heat[y] = qadd8( heat[y], random8(160,255) );
+    }
 
-// Input a value 0 to 255 to get a color value.
-// The colours are a transition r - g - b - back to r.
-uint32_t Wheel(byte WheelPos) {
-  WheelPos = 255 - WheelPos;
-  if(WheelPos < 85) {
-    return strip.Color(255 - WheelPos * 3, 0, WheelPos * 3);
-  }
-  if(WheelPos < 170) {
-    WheelPos -= 85;
-    return strip.Color(0, WheelPos * 3, 255 - WheelPos * 3);
-  }
-  WheelPos -= 170;
-  return strip.Color(WheelPos * 3, 255 - WheelPos * 3, 0);
+    // Step 4.  Map from heat cells to LED colors
+    for( int j = 0; j < NUM_LEDS; j++) {
+      // Scale the heat value from 0-255 down to 0-240
+      // for best results with color palettes.
+      byte colorindex = scale8( heat[j], 240);
+      CRGB color = ColorFromPalette( gPal, colorindex);
+      int pixelnumber;
+      pixelnumber = j;
+      leds[pixelnumber] = color;
+    }
 }
